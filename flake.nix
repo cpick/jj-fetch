@@ -26,6 +26,8 @@
         jj-fetch = final.callPackage ./nix/package.nix { };
       };
 
+      darwinModules.default = import ./nix/darwin-module.nix { inherit self; };
+
       packages = forAllSystems (pkgs: {
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.jj-fetch;
         jj-fetch = pkgs.callPackage ./nix/package.nix { };
