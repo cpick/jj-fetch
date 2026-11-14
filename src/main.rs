@@ -1,6 +1,8 @@
+mod daemon;
 mod discover;
 mod fetch;
 mod log;
+mod power;
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
