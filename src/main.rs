@@ -28,6 +28,21 @@ struct Cli {
 enum Command {
     /// Fetch all remotes of every repository once
     Fetch(FetchArgs),
+    /// Fetch all remotes of every repository periodically, while on AC power
+    Daemon {
+        #[command(flatten)]
+        fetch: FetchArgs,
+
+        /// How often to fetch
+        #[arg(long, default_value = "15m", value_parser = parse_duration)]
+        interval: Duration,
+
+        /// How often to check the power source and whether a fetch is due
+        #[arg(long, default_value = "1m", value_parser = parse_duration)]
+        check_interval: Duration,
+    },
+    /// Print the current power source
+    Power,
     /// List the repositories that would be fetched
     List(SearchArgs),
 }
@@ -117,6 +132,24 @@ impl SearchArgs {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Fetch(fetch) => exit_code(fetch.run()),
+        Command::Daemon {
+            fetch,
+            interval,
+            check_interval,
+        } => daemon::run(interval, check_interval, || {
+            // Failures are logged, and the next fetch may go better.
+            fetch.run();
+        }),
+        Command::Power => match power::current() {
+            Ok(source) => {
+                println!("{source}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                log!("{error}");
+                ExitCode::FAILURE
+            }
+        },
         Command::List(search) => {
             let discovery = search.discover();
             for repo in &discovery.repos {
