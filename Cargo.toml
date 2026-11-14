@@ -1,0 +1,10 @@
+[package]
+name = "jj-fetch"
+version = "0.1.0"
+edition = "2024"
+description = "Fetch all remotes of every Jujutsu repository in a directory, periodically while on AC power"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+humantime = "2"
