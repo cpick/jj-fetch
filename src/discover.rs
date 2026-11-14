@@ -1,7 +1,11 @@
 //! Finding Jujutsu workspaces within directories.
 
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 /// A repository to fetch, identified by one of its workspaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,15 +31,104 @@ pub struct Discovery {
 /// The search doesn't descend into workspaces, `.git` or `.jj` directories, or symlinks.
 /// Repositories with several workspaces are reported once, through the first workspace found.
 pub fn discover(dirs: &[PathBuf], max_depth: usize) -> Discovery {
-    let _ = (dirs, max_depth);
-    todo!()
+    let mut discovery = Discovery::default();
+    let mut seen_stores = HashSet::new();
+    for dir in dirs {
+        match dir.canonicalize() {
+            Ok(dir) => search(&dir, max_depth, &mut seen_stores, &mut discovery),
+            Err(error) => discovery.errors.push((dir.clone(), error)),
+        }
+    }
+    discovery
+}
+
+fn search(
+    dir: &Path,
+    depth_remaining: usize,
+    seen_stores: &mut HashSet<PathBuf>,
+    discovery: &mut Discovery,
+) {
+    match workspace_store(dir) {
+        Ok(Some(store)) => {
+            if seen_stores.insert(store.clone()) {
+                discovery.repos.push(Repo {
+                    workspace: dir.to_owned(),
+                    store,
+                });
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            discovery.errors.push((dir.join(".jj/repo"), error));
+            return;
+        }
+    }
+
+    let Some(depth_remaining) = depth_remaining.checked_sub(1) else {
+        return;
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            discovery.errors.push((dir.to_owned(), error));
+            return;
+        }
+    };
+    let mut subdirs = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                discovery.errors.push((dir.to_owned(), error));
+                continue;
+            }
+        };
+        // `DirEntry::file_type` doesn't follow symlinks.
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        if is_dir && entry.file_name() != ".git" && entry.file_name() != ".jj" {
+            subdirs.push(entry.path());
+        }
+    }
+    subdirs.sort();
+    for subdir in subdirs {
+        search(&subdir, depth_remaining, seen_stores, discovery);
+    }
+}
+
+/// Returns the canonical path of the store of the repository whose workspace is rooted at `dir`,
+/// or `None` if `dir` isn't the root of a workspace.
+fn workspace_store(dir: &Path) -> io::Result<Option<PathBuf>> {
+    let jj_dir = dir.join(".jj");
+    let repo = jj_dir.join("repo");
+    let metadata = match fs::metadata(&repo) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let store = if metadata.is_dir() {
+        repo
+    } else {
+        // A secondary workspace's `.jj/repo` file holds the path of the main workspace's
+        // `.jj/repo` directory, relative to its own `.jj` directory unless absolute.
+        let contents = fs::read(&repo)?;
+        let path = Path::new(OsStr::from_bytes(&contents));
+        jj_dir.join(path)
+    };
+    store.canonicalize().map(Some)
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
-    use std::path::Path;
     use std::slice;
 
     use tempfile::TempDir;
