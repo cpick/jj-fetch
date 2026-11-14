@@ -3,10 +3,19 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    # Only used to test the nix-darwin module.
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      nix-darwin,
+    }:
     let
       inherit (nixpkgs) lib;
       forAllSystems =
@@ -42,6 +51,11 @@
             doCheck = false;
             installPhase = "touch $out";
           });
+
+          darwin-module = import ./nix/darwin-module-test.nix {
+            inherit pkgs nix-darwin;
+            module = self.darwinModules.default;
+          };
 
           rustfmt =
             pkgs.runCommand "jj-fetch-rustfmt"
