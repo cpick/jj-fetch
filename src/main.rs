@@ -1,3 +1,5 @@
+mod discover;
+
 use std::process::ExitCode;
 
 use clap::Parser;
