@@ -28,9 +28,12 @@ jj --repository <workspace> --ignore-working-copy git fetch --all-remotes
   ask you to run `jj workspace update-stale`.
 - **Concurrency and timeouts:** up to `--jobs` (default 4) repositories are fetched at once, and a
   fetch running longer than `--timeout` (default 5m) is stopped. Git won't prompt for credentials.
-- **The daemon** checks the power source every `--check-interval` (default 1m), and fetches when on
-  AC power (not battery or UPS) and `--interval` (default 15m) has passed since the last fetch, so
-  it catches up within a minute of being plugged in. Fetches that changed nothing aren't logged.
+- **The daemon** fetches every `--interval` (default 15m) while on AC power, but not on battery or
+  UPS power. Instead of checking the power source periodically, it's notified by IOKit
+  (`IOPSCreateLimitedPowerNotification`) when the Mac switches between AC power and battery or UPS
+  power. So, while unplugged, it sets no timers and doesn't wake the CPU at all. When plugged back
+  in, it fetches right away if a fetch is overdue. A fetch already running when the Mac is unplugged
+  is allowed to finish. Fetches that changed nothing aren't logged.
 
 Run `jj-fetch help <command>` for all options.
 

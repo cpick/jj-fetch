@@ -15,3 +15,8 @@ core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+# A panic on any thread should stop the daemon, so that launchd restarts it, rather than leave it
+# half-working.
+panic = "abort"

@@ -36,10 +36,6 @@ enum Command {
         /// How often to fetch
         #[arg(long, default_value = "15m", value_parser = parse_duration)]
         interval: Duration,
-
-        /// How often to check the power source and whether a fetch is due
-        #[arg(long, default_value = "1m", value_parser = parse_duration)]
-        check_interval: Duration,
     },
     /// Print the current power source
     Power,
@@ -132,14 +128,14 @@ impl SearchArgs {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Fetch(fetch) => exit_code(fetch.run()),
-        Command::Daemon {
-            fetch,
-            interval,
-            check_interval,
-        } => daemon::run(interval, check_interval, || {
-            // Failures are logged, and the next fetch may go better.
-            fetch.run();
-        }),
+        Command::Daemon { fetch, interval } => {
+            let error = daemon::run(interval, move || {
+                // Failures are logged, and the next fetch may go better.
+                fetch.run();
+            });
+            log!("couldn't watch the power source: {error}");
+            ExitCode::FAILURE
+        }
         Command::Power => match power::current() {
             Ok(source) => {
                 println!("{source}");

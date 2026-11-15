@@ -70,12 +70,67 @@ pub fn current() -> Result<PowerSource, String> {
 /// Calls `on_change` with the current power source, and again each time the computer switches
 /// between AC power and a limited source (its battery or a UPS), forever.
 ///
-/// Between switches, the calling thread sleeps in its run loop, without waking the CPU.
+/// Between switches, the calling thread sleeps in its run loop, without waking the CPU. Returns
+/// only if it can't subscribe to IOKit's notifications.
+#[cfg(target_os = "macos")]
+pub fn watch(
+    on_change: impl FnMut(Result<PowerSource, String>) + 'static,
+) -> Result<Infallible, String> {
+    use std::ffi::c_void;
+
+    use core_foundation::base::TCFType;
+    use core_foundation::runloop::{
+        CFRunLoop, CFRunLoopSource, CFRunLoopSourceRef, kCFRunLoopDefaultMode,
+    };
+
+    type OnChange = Box<dyn FnMut(Result<PowerSource, String>)>;
+
+    #[link(name = "IOKit", kind = "framework")]
+    unsafe extern "C" {
+        /// Notifies when switching between unlimited (AC) and limited (battery or UPS) power,
+        /// unlike `IOPSNotificationCreateRunLoopSource`, which notifies of any change, like the
+        /// battery's charge.
+        fn IOPSCreateLimitedPowerNotification(
+            callback: extern "C" fn(context: *mut c_void),
+            context: *mut c_void,
+        ) -> CFRunLoopSourceRef;
+    }
+
+    extern "C" fn changed(context: *mut c_void) {
+        // SAFETY: `context` is the leaked `OnChange` below, and this runs on the thread that
+        // created it, from its run loop, so nothing else is using it.
+        let on_change = unsafe { &mut *context.cast::<OnChange>() };
+        on_change(current());
+    }
+
+    // Leaked, as the notifications never stop.
+    let context: *mut OnChange = Box::into_raw(Box::new(Box::new(on_change)));
+    // SAFETY: `changed` handles `context`, which lives forever.
+    let source = unsafe { IOPSCreateLimitedPowerNotification(changed, context.cast()) };
+    if source.is_null() {
+        return Err("IOPSCreateLimitedPowerNotification failed".to_owned());
+    }
+    // SAFETY: `source` is a non-null reference that we own.
+    let source = unsafe { CFRunLoopSource::wrap_under_create_rule(source) };
+    let run_loop = CFRunLoop::get_current();
+    // SAFETY: `kCFRunLoopDefaultMode` is an immutable constant.
+    run_loop.add_source(&source, unsafe { kCFRunLoopDefaultMode });
+
+    // Having subscribed, any later change will be reported, too.
+    changed(context.cast());
+    loop {
+        // Returns only if the run loop has nothing left to wait for, which it always will.
+        CFRunLoop::run_current();
+    }
+}
+
+/// Calls `on_change` with the current power source, and again each time it changes, forever.
+#[cfg(not(target_os = "macos"))]
 pub fn watch(
     on_change: impl FnMut(Result<PowerSource, String>) + 'static,
 ) -> Result<Infallible, String> {
     let _ = on_change;
-    todo!()
+    Err("watching the power source is only supported on macOS".to_owned())
 }
 
 /// Returns the current power source.

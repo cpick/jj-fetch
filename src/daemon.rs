@@ -1,40 +1,31 @@
 //! Fetching periodically while on AC power.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crate::log::log;
 use crate::power::{self, PowerSource};
 
-/// Calls `fetch` every `interval` while on AC power, checking the power source and whether a fetch
-/// is due every `check_interval`, forever.
-pub fn run(interval: Duration, check_interval: Duration, mut fetch: impl FnMut()) -> ! {
+/// Calls `fetch` every `interval` while on AC power, forever.
+///
+/// Rather than checking the power source periodically, it waits for IOKit to say that it changed.
+/// So off AC power, nothing wakes the CPU. Returns only if it can't watch the power source.
+pub fn run(interval: Duration, mut fetch: impl FnMut() + Send + 'static) -> String {
     log!(
         "fetching every {} while on AC power",
         humantime::format_duration(interval)
     );
-    let mut schedule = Schedule::new(interval);
-    let mut last_source = None;
-    loop {
-        let source = power::current();
-        // Log changes, rather than every check.
-        if last_source.as_ref() != Some(&source) {
-            match &source {
-                Ok(PowerSource::Ac) => log!("on AC power: fetching"),
-                Ok(source) => log!("on {source}: not fetching"),
-                Err(error) => log!("couldn't read the power source, so not fetching: {error}"),
-            }
-            last_source = Some(source.clone());
-        }
-
-        let now = SystemTime::now();
-        if source == Ok(PowerSource::Ac) && schedule.is_due(now) {
-            schedule.record_fetch(now);
-            fetch();
-        }
-        thread::sleep(check_interval.min(interval));
-    }
+    let (sender, receiver) = mpsc::channel();
+    // Fetch on another thread, leaving this one to wait in its run loop for power notifications.
+    thread::spawn(move || {
+        fetch_while_on_ac_power(interval, &mut Notifications(receiver), &mut fetch);
+    });
+    let Err(error) = power::watch(move |source| {
+        // Only fails if the fetching thread has gone, which only a panic (aborting) could cause.
+        let _ = sender.send(source);
+    });
+    error
 }
 
 /// What waiting for the power source to change came to.
@@ -64,8 +55,15 @@ pub struct Notifications(pub Receiver<Result<PowerSource, String>>);
 
 impl PowerChanges for Notifications {
     fn wait(&mut self, timeout: Option<Duration>) -> Wait {
-        let _ = (timeout, RecvTimeoutError::Timeout);
-        todo!()
+        let received = match timeout {
+            Some(timeout) => self.0.recv_timeout(timeout),
+            None => self.0.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match received {
+            Ok(source) => Wait::Changed(source),
+            Err(RecvTimeoutError::Timeout) => Wait::TimedOut,
+            Err(RecvTimeoutError::Disconnected) => Wait::Closed,
+        }
     }
 
     fn now(&self) -> SystemTime {
@@ -81,16 +79,43 @@ impl PowerChanges for Notifications {
 pub fn fetch_while_on_ac_power(
     interval: Duration,
     power: &mut impl PowerChanges,
-    fetch: impl FnMut(),
+    mut fetch: impl FnMut(),
 ) {
-    let _ = (interval, power, fetch);
-    todo!()
+    let mut schedule = Schedule::new(interval);
+    let mut source = None;
+    loop {
+        let timeout = if source == Some(Ok(PowerSource::Ac)) {
+            let now = power.now();
+            if schedule.is_due(now) {
+                schedule.record_fetch(now);
+                fetch();
+                continue;
+            }
+            Some(schedule.until_due(now))
+        } else {
+            None
+        };
+
+        match power.wait(timeout) {
+            Wait::Changed(new_source) => {
+                if source.as_ref() != Some(&new_source) {
+                    match &new_source {
+                        Ok(PowerSource::Ac) => log!("on AC power: fetching"),
+                        Ok(source) => log!("on {source}: not fetching"),
+                        Err(error) => {
+                            log!("couldn't read the power source, so not fetching: {error}")
+                        }
+                    }
+                }
+                source = Some(new_source);
+            }
+            Wait::TimedOut => {}
+            Wait::Closed => return,
+        }
+    }
 }
 
 /// Tracks when fetches are due.
-///
-/// Uses wall-clock time, which, unlike `Instant` on macOS, keeps counting while the computer
-/// sleeps.
 pub struct Schedule {
     interval: Duration,
     last_fetch: Option<SystemTime>,
@@ -106,19 +131,20 @@ impl Schedule {
 
     /// Whether a fetch is due at `now`.
     pub fn is_due(&self, now: SystemTime) -> bool {
-        match self.last_fetch {
-            None => true,
-            // An error means the clock went backwards, making the time since unknowable.
-            Some(last_fetch) => now
-                .duration_since(last_fetch)
-                .map_or(true, |elapsed| elapsed >= self.interval),
-        }
+        self.until_due(now).is_zero()
     }
 
     /// How long until a fetch is due, from `now`.
     pub fn until_due(&self, now: SystemTime) -> Duration {
-        let _ = now;
-        todo!()
+        match self.last_fetch {
+            None => Duration::ZERO,
+            // An error means the clock went backwards, making the time since unknowable.
+            Some(last_fetch) => now
+                .duration_since(last_fetch)
+                .map_or(Duration::ZERO, |elapsed| {
+                    self.interval.saturating_sub(elapsed)
+                }),
+        }
     }
 
     /// Records that a fetch started at `at`.
@@ -132,7 +158,6 @@ mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
     use std::rc::Rc;
-    use std::sync::mpsc;
 
     use super::*;
 
