@@ -1,5 +1,6 @@
 //! Reading the current power source from IOKit's power sources API.
 
+use std::convert::Infallible;
 use std::fmt;
 
 /// What the computer is drawing power from.
@@ -66,6 +67,17 @@ pub fn current() -> Result<PowerSource, String> {
         .ok_or_else(|| format!("unknown power source type {power_type:?}"))
 }
 
+/// Calls `on_change` with the current power source, and again each time the computer switches
+/// between AC power and a limited source (its battery or a UPS), forever.
+///
+/// Between switches, the calling thread sleeps in its run loop, without waking the CPU.
+pub fn watch(
+    on_change: impl FnMut(Result<PowerSource, String>) + 'static,
+) -> Result<Infallible, String> {
+    let _ = on_change;
+    todo!()
+}
+
 /// Returns the current power source.
 #[cfg(not(target_os = "macos"))]
 pub fn current() -> Result<PowerSource, String> {
@@ -105,5 +117,23 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn reads_the_current_power_source() {
         current().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn watch_starts_with_the_current_power_source() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Never returns, so leave it running.
+        std::thread::spawn(move || {
+            watch(move |source| {
+                let _ = sender.send(source);
+            })
+        });
+
+        let first = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+
+        assert_eq!(first, current());
     }
 }
